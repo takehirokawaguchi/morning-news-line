@@ -1,0 +1,51 @@
+name: Daily Morning News to LINE
+
+on:
+  schedule:
+    # 毎朝8:00 JST に実行 (JST = UTC+9 のため UTC 23:00 = JST 翌8:00)
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-news
+  cancel-in-progress: false
+
+jobs:
+  send-news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send morning news to LINE
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_NEWS_KEYWORDS_JSON: ${{ secrets.GOOGLE_NEWS_KEYWORDS_JSON }}
+        run: python scripts/send_news.py
+
+      - name: Persist sent-article cache
+        if: always()
+        run: |
+          if ! git diff --quiet -- data/sent_urls.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/sent_urls.json
+            git commit -m "chore: update sent news cache [skip ci]"
+            git push
+          else
+            echo "No cache changes to commit."
+          fi
