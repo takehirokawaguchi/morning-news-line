@@ -45,7 +45,7 @@ HTTP_HEADERS = {
     "User-Agent": "morning-news-line/1.0 (+https://github.com/)"
 }
 
-GEMINI_MODEL = "gemini-2.5-flash"  # 無料枠で使える標準的なflash系モデル。変更したい場合はここを編集
+GEMINI_MODEL = "gemini-3.6-flash"  # 無料枠で使える標準的なflash系モデル。変更したい場合はここを編集
 
 CACHE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
