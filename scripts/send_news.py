@@ -5,7 +5,7 @@
 - 技術系ニュース 3件(英語ソースは最大1件、残り2件以上は日本語ソース)
 - 技術系以外のニュース 7件(英語ソースは最大3件、残り4件以上は日本語ソース)
   (世界情勢・金融経済・一般ニュースを広くカバー)
-を Anthropic API (claude-sonnet-5) で日本語3〜4行に要約し、
+を Gemini API (gemini-2.5-flash、無料枠内) で日本語3〜4行に要約し、
 LINE Messaging API の push message で配信する。
 
 記事構成のルール(件数・言語比率)を変更したい場合は SELECTION_RULES を、
@@ -25,7 +25,9 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import feedparser
 import requests
-from anthropic import Anthropic
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 # --------------------------------------------------------------------------
 # 基本設定
@@ -43,7 +45,7 @@ HTTP_HEADERS = {
     "User-Agent": "morning-news-line/1.0 (+https://github.com/)"
 }
 
-ANTHROPIC_MODEL = "claude-sonnet-5"
+GEMINI_MODEL = "gemini-2.5-flash"  # 無料枠で使える標準的なflash系モデル。変更したい場合はここを編集
 
 CACHE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -57,6 +59,30 @@ SELECTION_RULES = {
     "tech": {"total": 3, "max_english": 1},
     "nontech": {"total": 7, "max_english": 3},
 }
+
+# 技術系以外を広げるためのGoogle Newsキーワード検索の既定リスト。
+# query/language(ja|en)/category(world|finance|general) を編集・追加・削除して調整できる。
+#
+# パブリックリポジトリに検索キーワード(=個人の興味関心)をそのまま載せたくない場合は、
+# GitHub Secrets に GOOGLE_NEWS_KEYWORDS_JSON という名前で同じ形式のJSON配列を設定すると、
+# 実行時にそちらが優先される(load_google_news_keywords() を参照)。
+DEFAULT_GOOGLE_NEWS_KEYWORDS = [
+    {"query": "国際情勢", "language": "ja", "category": "world"},
+    {"query": "外交 安全保障", "language": "ja", "category": "world"},
+    {"query": "紛争 停戦", "language": "ja", "category": "world"},
+    {"query": "geopolitics", "language": "en", "category": "world"},
+    {"query": "international relations", "language": "en", "category": "world"},
+    {"query": "金融政策 中央銀行", "language": "ja", "category": "finance"},
+    {"query": "株式市場", "language": "ja", "category": "finance"},
+    {"query": "為替 金利", "language": "ja", "category": "finance"},
+    {"query": "financial markets", "language": "en", "category": "finance"},
+    {"query": "global economy", "language": "en", "category": "finance"},
+    {"query": "国内ニュース", "language": "ja", "category": "general"},
+    {"query": "社会問題", "language": "ja", "category": "general"},
+    {"query": "政治", "language": "ja", "category": "general"},
+    {"query": "科学 医療", "language": "ja", "category": "general"},
+    {"query": "world news", "language": "en", "category": "general"},
+]
 
 
 # --------------------------------------------------------------------------
@@ -248,20 +274,115 @@ def fetch_zenn_trend(limit: int = 10) -> list[Article]:
     return articles
 
 
+def load_google_news_keywords() -> list[dict]:
+    """
+    Google Newsキーワード検索に使うキーワード設定を返す。
+
+    パブリックリポジトリのコードに検索キーワード(=個人の興味関心)を直接
+    書きたくない場合、環境変数 GOOGLE_NEWS_KEYWORDS_JSON (GitHub Secretsから
+    注入) に DEFAULT_GOOGLE_NEWS_KEYWORDS と同じ形式のJSON配列を設定すれば
+    そちらが優先される。未設定/解析失敗時は DEFAULT_GOOGLE_NEWS_KEYWORDS を使う。
+    """
+    raw = os.environ.get("GOOGLE_NEWS_KEYWORDS_JSON")
+    if not raw:
+        return DEFAULT_GOOGLE_NEWS_KEYWORDS
+    try:
+        keywords = json.loads(raw)
+        for kw in keywords:
+            if not all(k in kw for k in ("query", "language", "category")):
+                raise ValueError("各キーワードには query/language/category が必要です")
+        log.info("GOOGLE_NEWS_KEYWORDS_JSON からキーワード設定を読み込みました (%d件)", len(keywords))
+        return keywords
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        log.warning(
+            "GOOGLE_NEWS_KEYWORDS_JSON の解析に失敗したため既定のキーワードを使用します: %s", e
+        )
+        return DEFAULT_GOOGLE_NEWS_KEYWORDS
+
+
+def _google_news_locale(language: str) -> tuple[str, str, str]:
+    """言語コードから Google News の hl/gl/ceid パラメータを決める。"""
+    if language == "en":
+        return "en-US", "US", "US:en"
+    return "ja", "JP", "JP:ja"
+
+
+def fetch_google_news_search(
+    query: str, language: str, category: str, limit: int = 5
+) -> list[Article]:
+    """
+    Google News のキーワード検索RSS(無料・APIキー不要)。ロイター・共同・日経・AP・
+    Bloombergなど多数の媒体を横断的に拾える。`when:1d` を付与し直近24時間に絞る。
+    """
+    hl, gl, ceid = _google_news_locale(language)
+    try:
+        resp = _get(
+            "https://news.google.com/rss/search",
+            params={"q": f"{query} when:1d", "hl": hl, "gl": gl, "ceid": ceid},
+        )
+        parsed = feedparser.parse(resp.content)
+    except Exception as e:
+        log.warning("Google News検索(query=%s)の取得に失敗しました: %s", query, e)
+        return []
+
+    articles = []
+    for entry in parsed.entries[:limit]:
+        raw_title = getattr(entry, "title", "").strip()
+        link = getattr(entry, "link", "").strip()
+        if not raw_title or not link:
+            continue
+
+        # Google Newsのtitleは "記事タイトル - 媒体名" の形式。
+        # <source>要素があればそちらを優先し、媒体名を分離する。
+        source_tag = getattr(entry, "source", None)
+        if source_tag is not None and getattr(source_tag, "title", ""):
+            publisher = source_tag.title.strip()
+            title = raw_title
+            if title.endswith(f" - {publisher}"):
+                title = title[: -(len(publisher) + 3)].strip()
+        elif " - " in raw_title:
+            title, publisher = raw_title.rsplit(" - ", 1)
+            title, publisher = title.strip(), publisher.strip()
+        else:
+            title, publisher = raw_title, "Google News"
+
+        articles.append(
+            Article(
+                title=title,
+                url=link,
+                source=publisher,
+                language=language,
+                category=category,
+            )
+        )
+    return articles
+
+
 def collect_source_pools() -> tuple[list[Article], list[Article], list[Article], list[Article]]:
     """(技術系:日本語, 技術系:英語, 技術系以外:日本語, 技術系以外:英語) のプールを返す。"""
 
     tech_ja = fetch_qiita_trend() + fetch_zenn_trend()
     tech_en = fetch_hackernews()
 
-    nontech_ja = (
-        fetch_rss("https://www3.nhk.or.jp/rss/news/cat0.xml", "NHKニュース", "ja", "general")
-        + fetch_rss("https://www3.nhk.or.jp/rss/news/cat5.xml", "NHKニュース(国際)", "ja", "world")
-        + fetch_rss("https://www3.nhk.or.jp/rss/news/cat4.xml", "NHKニュース(経済)", "ja", "finance")
-    )
+    keywords = load_google_news_keywords()
+    google_news_ja = [
+        article
+        for kw in keywords
+        if kw["language"] == "ja"
+        for article in fetch_google_news_search(kw["query"], kw["language"], kw["category"])
+    ]
+    google_news_en = [
+        article
+        for kw in keywords
+        if kw["language"] == "en"
+        for article in fetch_google_news_search(kw["query"], kw["language"], kw["category"])
+    ]
+
+    nontech_ja = google_news_ja
     nontech_en = (
         fetch_rss("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC News", "en", "world")
         + fetch_rss("https://feeds.bbci.co.uk/news/business/rss.xml", "BBC News(Business)", "en", "finance")
+        + google_news_en
     )
 
     return tech_ja, tech_en, nontech_ja, nontech_en
@@ -310,7 +431,7 @@ def select_articles(japanese: list[Article], english: list[Article], total: int,
 
 
 # --------------------------------------------------------------------------
-# 要約 (Anthropic API)
+# 要約 (Gemini API)
 # --------------------------------------------------------------------------
 
 BASE_SYSTEM_PROMPT = """\
@@ -338,34 +459,45 @@ def build_system_prompt(category: str) -> str:
     return BASE_SYSTEM_PROMPT
 
 
-def summarize_article(client: Anthropic, article: Article) -> str:
+def summarize_article(client: genai.Client, article: Article) -> str:
     user_content = f"タイトル: {article.title}\n"
     if article.snippet:
         user_content += f"概要: {article.snippet}\n"
 
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=400,
-        temperature=0.3,
-        system=build_system_prompt(article.category),
-        messages=[{"role": "user", "content": user_content}],
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=user_content,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=build_system_prompt(article.category),
+            temperature=0.3,
+            max_output_tokens=400,
+        ),
     )
-    parts = [block.text for block in response.content if getattr(block, "type", None) == "text"]
-    return "".join(parts).strip()
+    return (response.text or "").strip()
 
 
-def summarize_all(client: Anthropic, articles: list[Article]) -> list[Article]:
+def summarize_all(client: genai.Client, articles: list[Article]) -> list[Article]:
     ok, failed = [], []
     for article in articles:
         try:
             article.summary = summarize_article(client, article)
             ok.append(article)
-        except Exception as e:
-            log.error("要約に失敗したため、この記事はスキップします (source=%s): %s", article.source, e)
+        except genai_errors.APIError as e:
+            if e.code == 429:
+                # 無料枠のレート制限/クォータ超過。残りの記事に対して同じリクエストを
+                # 繰り返しても無駄なので、即座に実行全体を中断する。
+                raise NewsError(
+                    "Gemini APIのレート制限(無料枠の上限)に達しました。"
+                    "しばらく待つか、Google AI Studioで利用状況を確認してください。"
+                ) from e
+            log.error(
+                "要約に失敗したため、この記事はスキップします (source=%s, code=%s): %s",
+                article.source, e.code, e.message,
+            )
             failed.append(article)
 
     if not ok:
-        raise NewsError("すべての記事の要約に失敗しました。Anthropic APIの状態を確認してください。")
+        raise NewsError("すべての記事の要約に失敗しました。Gemini APIの状態を確認してください。")
     if failed:
         log.warning("%d件の記事で要約に失敗しました(送信からは除外)", len(failed))
     return ok
@@ -452,7 +584,7 @@ def main() -> int:
     try:
         line_token = require_env("LINE_CHANNEL_ACCESS_TOKEN")
         line_user_id = require_env("LINE_USER_ID")
-        anthropic_api_key = require_env("ANTHROPIC_API_KEY")
+        gemini_api_key = require_env("GEMINI_API_KEY")
 
         cache = load_cache()
         seen_urls = set(cache.keys())
@@ -487,8 +619,8 @@ def main() -> int:
             "選定件数: 技術系=%d件, 技術系以外=%d件", len(tech_selected), len(nontech_selected)
         )
 
-        client = Anthropic(api_key=anthropic_api_key)
-        log.info("Anthropic APIで要約を生成しています...")
+        client = genai.Client(api_key=gemini_api_key)
+        log.info("Gemini APIで要約を生成しています...")
         tech_summarized = summarize_all(client, tech_selected)
         nontech_summarized = summarize_all(client, nontech_selected)
 

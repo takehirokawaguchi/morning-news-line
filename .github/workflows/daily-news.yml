@@ -33,7 +33,8 @@ jobs:
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_NEWS_KEYWORDS_JSON: ${{ secrets.GOOGLE_NEWS_KEYWORDS_JSON }}
         run: python scripts/send_news.py
 
       - name: Persist sent-article cache
