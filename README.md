@@ -4,7 +4,7 @@
 
 技術系ニュース(Qiita/Zennトレンド、Hacker News)に加えて、世界情勢・金融経済・
 一般ニュース(BBC News、Google Newsキーワード検索)など、普段自分から追わない
-ジャンルも含めて幅広く収集し、Gemini API (`gemini-2.5-flash`、無料枠内で利用) で
+ジャンルも含めて幅広く収集し、Gemini API (`gemini-3.6-flash`、無料枠内で利用) で
 日本語3〜4行に要約した上で、LINE Messaging APIのpush messageで毎朝8:00 (JST) に
 配信します。
 
