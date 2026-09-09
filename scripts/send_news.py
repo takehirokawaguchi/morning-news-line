@@ -22,6 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import feedparser
@@ -49,12 +50,13 @@ HTTP_HEADERS = {
 GEMINI_MODEL = "gemini-3.6-flash"  # 無料枠で使える標準的なflash系モデル。変更したい場合はここを編集
 
 # 無料枠のレート制限(1分あたりのリクエスト数)に引っかからないよう、
-# Gemini呼び出しの間隔をあける。429が出た場合も、無料枠を使い切ったと即断せず
-# 有限回リトライしてから諦める(無限リトライはしない = 課金は発生しないが、
-# ワークフローが終わらなくなることも防ぐ)。
+# Gemini呼び出しの間隔をあける。429(レート制限)・503(モデルの一時的な高負荷)が
+# 出た場合も、即座に諦めず有限回リトライする(無限リトライはしない = 課金は
+# 発生しないが、ワークフローが終わらなくなることも防ぐ)。
 GEMINI_REQUEST_INTERVAL_SECONDS = 30
 GEMINI_RATE_LIMIT_RETRY_SECONDS = 20
 GEMINI_RATE_LIMIT_MAX_RETRIES = 2
+GEMINI_RETRYABLE_CODES = (429, 503)
 
 CACHE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -367,18 +369,34 @@ def fetch_google_news_search(
     return articles
 
 
+def _interleave(*lists: list[Article]) -> list[Article]:
+    """複数リストを1件ずつ交互に並べる。
+
+    単純に連結すると、記事数の多いソース(例: Qiita)だけで必要件数が
+    埋まってしまい、他のソース(はてなブックマーク等)が事実上選ばれなく
+    なる。select_articles() はリスト先頭から必要件数を取るため、
+    ここで交互に並べておくことで特定ソースへの偏りを防ぐ。
+    """
+    result = []
+    for group in zip_longest(*lists):
+        for item in group:
+            if item is not None:
+                result.append(item)
+    return result
+
+
 def collect_source_pools() -> tuple[list[Article], list[Article], list[Article], list[Article]]:
     """(技術系:日本語, 技術系:英語, 技術系以外:日本語, 技術系以外:英語) のプールを返す。"""
 
-    tech_ja = (
-        fetch_qiita_trend()
-        + fetch_zenn_trend()
-        + fetch_rss(
+    tech_ja = _interleave(
+        fetch_qiita_trend(),
+        fetch_zenn_trend(),
+        fetch_rss(
             "https://b.hatena.ne.jp/hotentry/it.rss",
             "はてなブックマーク(テクノロジー)",
             "ja",
             "tech",
-        )
+        ),
     )
     tech_en = fetch_hackernews()
 
@@ -522,20 +540,20 @@ def summarize_all(client: genai.Client, articles: list[Article]) -> list[Article
                 ok.append(article)
                 break
             except genai_errors.APIError as e:
-                if e.code == 429:
+                if e.code in GEMINI_RETRYABLE_CODES:
                     retries += 1
                     if retries > GEMINI_RATE_LIMIT_MAX_RETRIES:
-                        # 待ってリトライしても解消しない = 本当に無料枠の上限に達した
-                        # 可能性が高いので、これ以上リクエストを続けず中断する
-                        # (無限リトライにはしない = 課金は発生しないが、ワークフローが
-                        # 終わらなくなることも防ぐ)。
+                        # 待ってリトライしても解消しない = 本当に無料枠の上限に達した、
+                        # あるいはモデルの高負荷が長引いている可能性が高いので、
+                        # これ以上リクエストを続けず中断する(無限リトライにはしない
+                        # = 課金は発生しないが、ワークフローが終わらなくなることも防ぐ)。
                         raise NewsError(
-                            "Gemini APIのレート制限(無料枠の上限)に達しました。"
+                            "Gemini APIのレート制限または一時的な高負荷(429/503)が解消しません。"
                             "しばらく待つか、Google AI Studioで利用状況を確認してください。"
                         ) from e
                     log.warning(
-                        "Gemini APIのレート制限(429)。%d秒待って再試行します (%d/%d) (source=%s)",
-                        GEMINI_RATE_LIMIT_RETRY_SECONDS, retries, GEMINI_RATE_LIMIT_MAX_RETRIES,
+                        "Gemini APIのレート制限/高負荷(code=%s)。%d秒待って再試行します (%d/%d) (source=%s)",
+                        e.code, GEMINI_RATE_LIMIT_RETRY_SECONDS, retries, GEMINI_RATE_LIMIT_MAX_RETRIES,
                         article.source,
                     )
                     time.sleep(GEMINI_RATE_LIMIT_RETRY_SECONDS)
