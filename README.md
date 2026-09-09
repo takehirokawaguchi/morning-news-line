@@ -2,17 +2,18 @@
 
 自分用の「朝刊」を毎朝LINEに配信するGitHub Actionsワークフローです。
 
-技術系ニュース(Qiita/Zennトレンド、Hacker News)に加えて、世界情勢・金融経済・
-一般ニュース(BBC News、Google Newsキーワード検索)など、普段自分から追わない
-ジャンルも含めて幅広く収集し、Gemini API (`gemini-3.6-flash`、無料枠内で利用) で
-日本語3〜4行に要約した上で、LINE Messaging APIのpush messageで毎朝7:43 (JST) 頃に
-配信します。
+技術系ニュース(Qiita/Zennトレンド、Hacker News、はてなブックマークのテックブログ)
+に加えて、世界情勢・金融経済・一般ニュース(BBC News、Google Newsキーワード検索)
+など、普段自分から追わないジャンルも含めて幅広く収集し、Gemini API
+(`gemini-3.6-flash`、無料枠内で利用) で日本語3〜4行に要約した上で、
+LINE Messaging APIのpush messageで毎朝7:43 (JST) 頃に配信します。
 
 ## 配信内容
 
-- **技術系: 3件**(英語ソースは最大1件、残り2件以上は日本語ソース)
-  - ソース: Qiita トレンド, Zenn トレンド, Hacker News
-- **技術系以外: 7件**(英語ソースは最大3件、残り4件以上は日本語ソース)
+- **技術系: 4件**(英語ソースは最大1件、残り3件以上は日本語ソース)
+  - ソース: Qiita トレンド, Zenn トレンド, Hacker News, はてなブックマーク
+    (テクノロジーカテゴリ。企業のエンジニアリングブログや個人の技術ブログを含む)
+- **技術系以外: 6件**(英語ソースは最大3件、残り3件以上は日本語ソース)
   - 世界情勢・金融経済・一般ニュースを広くカバー
   - ソース: BBC News(World/Business)、Google Newsキーワード検索(無料・APIキー不要。
     ロイター・共同通信・日経・APなど多数の媒体を横断的に拾える)
@@ -78,8 +79,8 @@ API側がHTTP 429(レート制限エラー)を返してその日の実行は失�
 
 ```python
 SELECTION_RULES = {
-    "tech": {"total": 3, "max_english": 1},
-    "nontech": {"total": 7, "max_english": 3},
+    "tech": {"total": 4, "max_english": 1},
+    "nontech": {"total": 6, "max_english": 3},
 }
 ```
 

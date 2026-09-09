@@ -2,8 +2,8 @@
 """
 自分用の朝刊ニュースを収集・要約し、LINEに配信するスクリプト。
 
-- 技術系ニュース 3件(英語ソースは最大1件、残り2件以上は日本語ソース)
-- 技術系以外のニュース 7件(英語ソースは最大3件、残り4件以上は日本語ソース)
+- 技術系ニュース 4件(英語ソースは最大1件、残り3件以上は日本語ソース)
+- 技術系以外のニュース 6件(英語ソースは最大3件、残り3件以上は日本語ソース)
   (世界情勢・金融経済・一般ニュースを広くカバー)
 を Gemini API (無料枠内、モデルは GEMINI_MODEL 定数を参照) で日本語3〜4行に要約し、
 LINE Messaging API の push message で配信する。
@@ -65,8 +65,8 @@ CACHE_RETENTION_DAYS = 30  # 直近何日分のURLを重複排除の対象とし
 
 # 記事構成ルール。件数・英語比率を変えたい場合はここを編集する。
 SELECTION_RULES = {
-    "tech": {"total": 3, "max_english": 1},
-    "nontech": {"total": 7, "max_english": 3},
+    "tech": {"total": 4, "max_english": 1},
+    "nontech": {"total": 6, "max_english": 3},
 }
 
 # 技術系以外を広げるためのGoogle Newsキーワード検索の既定リスト。
@@ -370,7 +370,16 @@ def fetch_google_news_search(
 def collect_source_pools() -> tuple[list[Article], list[Article], list[Article], list[Article]]:
     """(技術系:日本語, 技術系:英語, 技術系以外:日本語, 技術系以外:英語) のプールを返す。"""
 
-    tech_ja = fetch_qiita_trend() + fetch_zenn_trend()
+    tech_ja = (
+        fetch_qiita_trend()
+        + fetch_zenn_trend()
+        + fetch_rss(
+            "https://b.hatena.ne.jp/hotentry/it.rss",
+            "はてなブックマーク(テクノロジー)",
+            "ja",
+            "tech",
+        )
+    )
     tech_en = fetch_hackernews()
 
     keywords = load_google_news_keywords()
