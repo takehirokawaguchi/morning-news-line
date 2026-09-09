@@ -2,8 +2,11 @@ name: Daily Morning News to LINE
 
 on:
   schedule:
-    # 毎朝8:00 JST に実行 (JST = UTC+9 のため UTC 23:00 = JST 翌8:00)
-    - cron: "0 23 * * *"
+    # 毎朝7:43 JST に実行 (JST = UTC+9 のため UTC 22:43 = JST 翌7:43)。
+    # 毎時00分ちょうどはGitHub Actions全体で混雑し遅延しやすいためずらしている。
+    # また、Gemini無料枠のレート制限を避けるための待機(最大数分)を見込み、
+    # 8:00 JSTより早めに開始する。
+    - cron: "43 22 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -16,7 +19,7 @@ concurrency:
 jobs:
   send-news:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -5,7 +5,7 @@
 技術系ニュース(Qiita/Zennトレンド、Hacker News)に加えて、世界情勢・金融経済・
 一般ニュース(BBC News、Google Newsキーワード検索)など、普段自分から追わない
 ジャンルも含めて幅広く収集し、Gemini API (`gemini-3.6-flash`、無料枠内で利用) で
-日本語3〜4行に要約した上で、LINE Messaging APIのpush messageで毎朝8:00 (JST) に
+日本語3〜4行に要約した上で、LINE Messaging APIのpush messageで毎朝7:43 (JST) 頃に
 配信します。
 
 ## 配信内容
@@ -142,8 +142,11 @@ APIキー・アクセストークンなどの機密情報は出力しません�
 
 ## GitHub Actionsでの実行
 
-- `.github/workflows/daily-news.yml` が毎朝8:00 (JST) に自動実行されます
-  (cronはUTC基準のため `0 23 * * *` = UTC 23:00 = JST翌8:00 と設定しています)
+- `.github/workflows/daily-news.yml` が毎朝7:43 (JST) 頃に自動実行されます
+  (cronはUTC基準のため `43 22 * * *` = UTC 22:43 = JST翌7:43 と設定しています)。
+  Gemini無料枠のレート制限を避けるための待機を挟むため実行に数分かかるので、
+  8:00 JSTより早めに開始しています。また毎時00分ちょうどはGitHub Actions全体で
+  混雑し実行が遅延しやすいため、その時刻もあえて避けています
 - `Actions` タブから `Daily Morning News to LINE` を選択し、`Run workflow` から
   手動実行も可能です
 - ニュースソースの取得失敗やAPIエラーが発生した場合、ワークフローは失敗
