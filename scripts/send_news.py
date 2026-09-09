@@ -5,7 +5,7 @@
 - 技術系ニュース 3件(英語ソースは最大1件、残り2件以上は日本語ソース)
 - 技術系以外のニュース 7件(英語ソースは最大3件、残り4件以上は日本語ソース)
   (世界情勢・金融経済・一般ニュースを広くカバー)
-を Gemini API (gemini-2.5-flash、無料枠内) で日本語3〜4行に要約し、
+を Gemini API (無料枠内、モデルは GEMINI_MODEL 定数を参照) で日本語3〜4行に要約し、
 LINE Messaging API の push message で配信する。
 
 記事構成のルール(件数・言語比率)を変更したい場合は SELECTION_RULES を、
@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
@@ -46,6 +47,14 @@ HTTP_HEADERS = {
 }
 
 GEMINI_MODEL = "gemini-3.6-flash"  # 無料枠で使える標準的なflash系モデル。変更したい場合はここを編集
+
+# 無料枠のレート制限(1分あたりのリクエスト数)に引っかからないよう、
+# Gemini呼び出しの間隔をあける。429が出た場合も、無料枠を使い切ったと即断せず
+# 有限回リトライしてから諦める(無限リトライはしない = 課金は発生しないが、
+# ワークフローが終わらなくなることも防ぐ)。
+GEMINI_REQUEST_INTERVAL_SECONDS = 30
+GEMINI_RATE_LIMIT_RETRY_SECONDS = 20
+GEMINI_RATE_LIMIT_MAX_RETRIES = 2
 
 CACHE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -459,11 +468,29 @@ def build_system_prompt(category: str) -> str:
     return BASE_SYSTEM_PROMPT
 
 
+_last_gemini_call_at: float = 0.0
+
+
+def _pace_gemini_call() -> None:
+    """前回のGemini呼び出しから GEMINI_REQUEST_INTERVAL_SECONDS 秒あけて発行する。
+
+    技術系・技術系以外の両セクションを通して一貫して効くよう、
+    summarize_all のループ側ではなくここ(実際の呼び出し直前)で待機する。
+    """
+    global _last_gemini_call_at
+    now = time.monotonic()
+    wait = GEMINI_REQUEST_INTERVAL_SECONDS - (now - _last_gemini_call_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_gemini_call_at = time.monotonic()
+
+
 def summarize_article(client: genai.Client, article: Article) -> str:
     user_content = f"タイトル: {article.title}\n"
     if article.snippet:
         user_content += f"概要: {article.snippet}\n"
 
+    _pace_gemini_call()
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=user_content,
@@ -479,22 +506,37 @@ def summarize_article(client: genai.Client, article: Article) -> str:
 def summarize_all(client: genai.Client, articles: list[Article]) -> list[Article]:
     ok, failed = [], []
     for article in articles:
-        try:
-            article.summary = summarize_article(client, article)
-            ok.append(article)
-        except genai_errors.APIError as e:
-            if e.code == 429:
-                # 無料枠のレート制限/クォータ超過。残りの記事に対して同じリクエストを
-                # 繰り返しても無駄なので、即座に実行全体を中断する。
-                raise NewsError(
-                    "Gemini APIのレート制限(無料枠の上限)に達しました。"
-                    "しばらく待つか、Google AI Studioで利用状況を確認してください。"
-                ) from e
-            log.error(
-                "要約に失敗したため、この記事はスキップします (source=%s, code=%s): %s",
-                article.source, e.code, e.message,
-            )
-            failed.append(article)
+        retries = 0
+        while True:
+            try:
+                article.summary = summarize_article(client, article)
+                ok.append(article)
+                break
+            except genai_errors.APIError as e:
+                if e.code == 429:
+                    retries += 1
+                    if retries > GEMINI_RATE_LIMIT_MAX_RETRIES:
+                        # 待ってリトライしても解消しない = 本当に無料枠の上限に達した
+                        # 可能性が高いので、これ以上リクエストを続けず中断する
+                        # (無限リトライにはしない = 課金は発生しないが、ワークフローが
+                        # 終わらなくなることも防ぐ)。
+                        raise NewsError(
+                            "Gemini APIのレート制限(無料枠の上限)に達しました。"
+                            "しばらく待つか、Google AI Studioで利用状況を確認してください。"
+                        ) from e
+                    log.warning(
+                        "Gemini APIのレート制限(429)。%d秒待って再試行します (%d/%d) (source=%s)",
+                        GEMINI_RATE_LIMIT_RETRY_SECONDS, retries, GEMINI_RATE_LIMIT_MAX_RETRIES,
+                        article.source,
+                    )
+                    time.sleep(GEMINI_RATE_LIMIT_RETRY_SECONDS)
+                    continue
+                log.error(
+                    "要約に失敗したため、この記事はスキップします (source=%s, code=%s): %s",
+                    article.source, e.code, e.message,
+                )
+                failed.append(article)
+                break
 
     if not ok:
         raise NewsError("すべての記事の要約に失敗しました。Gemini APIの状態を確認してください。")
